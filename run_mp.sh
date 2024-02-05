@@ -1,0 +1,1 @@
+mpirun -np 1 -npernode 4 python train_mp.py --n-gpu-per-node 4 --beta-max 0.3 --corrupt jpeg-5 --num-itr 1000 --dataset-dir "/kyb/agks/wangqi/ImageNet/ILSVRC/Data/CLS-LOC/" --log-writer 'tensorboard' --microbatch 2 --interval 1000

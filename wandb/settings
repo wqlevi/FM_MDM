@@ -1,0 +1,5 @@
+[default]
+entity = wqlevi
+project = i2sb
+base_url = https://api.wandb.ai
+

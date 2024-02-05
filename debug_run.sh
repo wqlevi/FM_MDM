@@ -1,0 +1,2 @@
+#CUDA_VISIBLE_DEVICES=2,3 python train_mp.py --n-gpu-per-node 1 --name 'debug_runtime' --beta-max 0.3 --corrupt jpeg-5 --num-itr 1 --dataset-dir "/kyb/agks/wangqi/ImageNet/ILSVRC/Data/CLS-LOC/" --log-writer 'tensorboard' --microbatch 2 --interval 1000 --wandb-api-key e8b8669b01462d8329d90ab655789f2e0e203ca8 --wandb-user 'wqlevi' --log-writer 'wandb'
+CUDA_VISIBLE_DEVICES=0,1 python train_mp.py --n-gpu-per-node 2 --name 'debug_runtime' --beta-max 0.3 --corrupt jpeg-5 --num-itr 1 --dataset-dir "/kyb/agks/wangqi/ImageNet/ILSVRC/Data/CLS-LOC/" --microbatch 2 --interval 1000
