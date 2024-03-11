@@ -24,7 +24,7 @@ def init_processes(rank, size, fn, args):
     print("\033[92mcuda%d inited!\033[0m"%torch.cuda.current_device()) if torch.cuda.is_initialized() else print("Init failed") 
     dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=size)
     fn(args)
-    dist.barrier()
+    dist.barrier() # wait all processes to finish
     cleanup()
 
 def cleanup():

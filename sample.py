@@ -23,7 +23,7 @@ import torchvision.utils as tu
 
 from logger import Logger
 import distributed_util as dist_util
-from i2sb import Runner, download_ckpt
+from i2sb import Runner_old, download_ckpt
 from corruption import build_corruption
 from dataset import imagenet
 from i2sb import ckpt_util
@@ -154,7 +154,7 @@ def main(opt):
     log.info(f"subset loaded with imgs:  {len(subset_dataset)=}!")
 
     # build runner
-    runner = Runner(ckpt_opt, log, save_opt=False)
+    runner = Runner_old(ckpt_opt, log, save_opt=False)
 
     # handle use_fp16 for ema
     if opt.use_fp16:
@@ -240,7 +240,7 @@ if __name__ == '__main__':
     opt.update(vars(arg))
 
     # one-time download: ADM checkpoint
-    download_ckpt("data/")
+    #download_ckpt("data/")
 
     set_seed(opt.seed)
 

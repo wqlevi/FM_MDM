@@ -27,6 +27,10 @@ from easydict import EasyDict as edict
 from ipdb import set_trace as debug
 
 ADM_IMG256_UNCOND_CKPT = "https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt"
+I2SB_IMG128_UNCOND_PKL = "128x128_diffusion_uncond_fixedsigma.pkl"
+I2SB_IMG256_SMALL_UNCOND_PKL = "256x256_small_diffusion_uncond_fixedsigma.pkl"
+I2SB_IMG128_COND_PKL = "128x128_diffusion_cond_fixedsigma.pkl"
+I2SB_IMG128_COND_CKPT = "128x128_diffusion_cond_fixedsigma.pt"
 I2SB_IMG256_UNCOND_PKL = "256x256_diffusion_uncond_fixedsigma.pkl"
 I2SB_IMG256_UNCOND_CKPT = "256x256_diffusion_uncond_fixedsigma.pt"
 I2SB_IMG256_COND_PKL = "256x256_diffusion_cond_fixedsigma.pkl"
@@ -42,6 +46,37 @@ def download(url, local_path, chunk_size=1024):
                     if data:
                         f.write(data)
                         pbar.update(chunk_size)
+def create_128_argparser():
+    return Namespace(
+        attention_resolutions='16,8',
+        batch_size=4,
+        channel_mult='',
+        class_cond=False,
+        clip_denoised=True,
+        diffusion_steps=1000,
+        dropout=0.0,
+        image_size=128,
+        learn_sigma=True,
+        adm_ckpt='128x128_diffusion_uncond.pt',
+        noise_schedule='linear',
+        num_channels=128,
+        num_head_channels=64,
+        num_heads=3,
+        num_heads_upsample=-1,
+        num_res_blocks=2,
+        num_samples=4,
+        predict_xstart=False,
+        resblock_updown=True,
+        rescale_learned_sigmas=False,
+        rescale_timesteps=False,
+        timestep_respacing='250',
+        use_checkpoint=False,
+        use_ddim=False,
+        use_fp16=True,
+        use_kl=False,
+        use_new_attention_order=False,
+        use_scale_shift_norm=True
+    )
 
 def create_argparser():
     return Namespace(
@@ -106,6 +141,34 @@ def extract_diffusion_kwargs(kwargs):
         "rescale_learned_sigmas": kwargs["rescale_learned_sigmas"],
         "timestep_respacing": kwargs["timestep_respacing"],
     }
+
+def download_adm_image128_uncond_ckpt(ckpt_dir="data/"):
+    ckpt_pkl = os.path.join(ckpt_dir, I2SB_IMG128_UNCOND_PKL)
+    ckpt_pt  = os.path.join(ckpt_dir, I2SB_IMG128_UNCOND_CKPT)
+    if os.path.exists(ckpt_pkl) and os.path.exists(ckpt_pt):
+        return
+
+    opt = create_128_argparser()
+
+    adm_ckpt = os.path.join(ckpt_dir, opt.adm_ckpt)
+    if not os.path.exists(adm_ckpt):
+        print("Downloading ADM checkpoint to {} ...".format(adm_ckpt))
+        download(ADM_IMG128_UNCOND_CKPT, adm_ckpt)
+    ckpt_state_dict = torch.load(adm_ckpt, map_location="cpu")
+
+    # pt: remove the sigma prediction
+    ckpt_state_dict["out.2.weight"] = ckpt_state_dict["out.2.weight"][:3]
+    ckpt_state_dict["out.2.bias"] = ckpt_state_dict["out.2.bias"][:3]
+    torch.save(ckpt_state_dict, ckpt_pt)
+
+    # pkl
+    kwargs = args_to_dict(opt, model_and_diffusion_defaults().keys())
+    kwargs['learn_sigma'] = False
+    model_kwargs = extract_model_kwargs(kwargs)
+    with open(ckpt_pkl, "wb") as f:
+        pickle.dump(model_kwargs, f)
+
+    print(f"Saved adm uncond pretrain models at {ckpt_pkl=} and {ckpt_pt}!")
 
 def download_adm_image256_uncond_ckpt(ckpt_dir="data/"):
     ckpt_pkl = os.path.join(ckpt_dir, I2SB_IMG256_UNCOND_PKL)
@@ -174,6 +237,8 @@ def download_adm_image256_cond_ckpt(ckpt_dir="data/"):
 
 def download_ckpt(ckpt_dir="data/"):
     os.makedirs(ckpt_dir, exist_ok=True)
+    download_adm_image128_uncond_ckpt(ckpt_dir=ckpt_dir)
+    download_adm_image128_cond_ckpt(ckpt_dir=ckpt_dir)
     download_adm_image256_uncond_ckpt(ckpt_dir=ckpt_dir)
     download_adm_image256_cond_ckpt(ckpt_dir=ckpt_dir)
 

@@ -18,11 +18,13 @@ from torchvision.utils import make_grid
 from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
-from i2sb.network import Image256Net
+from i2sb.network import Image128Net
 from i2sb.diffusion import Diffusion
 from i2sb.runner import make_beta_schedule, build_optimizer_sched
+from i2sb import util 
 from evaluation import build_resnet50
 from logger import Logger
+
 
 def update_ema(model_ema, model_net, decay=0.9999):
     param_ema = dict(model_ema.named_parameters())
@@ -44,17 +46,18 @@ class Runner(L.LightningModule):
         betas = np.concatenate([betas[:opt.interval//2],
                            np.flip(betas[:opt.interval//2])])
         self.opt = opt
-        self.SysLog = log
+        self.syslog = log
 
-        self.dataset = Dset(opt.dataset_dir, opt.image_size)
+        self.train_dataset = Dset(Path(opt.dataset_dir, "train", "subclass_train"), opt.image_size)
+        self.val_dataset = Dset(Path(opt.dataset_dir, "val", "subcalss_val"), opt.image_size)
 
         self.diffusion = Diffusion(betas) #TODO no 'device' arg here
         log.info(f"[Diffusion] Built I2SB diffusion: steps={len(betas)}!")
         noise_levels = torch.linspace(opt.t0, opt.T, opt.interval)
 
-        self.net = Image256Net(log, noise_levels=noise_levels, use_fp16=self.opt.use_fp16, cond=opt.cond_x1)
+        self.net = Image128Net(log, noise_levels=noise_levels, use_fp16=self.opt.use_fp16, cond=opt.cond_x1)
         #self.ema = ExponentialMovingAverage(self.net.parameters(), decay=opt.ema)
-        self.ema = Image256Net(log, noise_levels=noise_levels, use_fp16=self.opt.use_fp16, cond=opt.cond_x1)
+        self.ema = Image128Net(log, noise_levels=noise_levels, use_fp16=self.opt.use_fp16, cond=opt.cond_x1)
 
         self.resnet = build_resnet50()
         self.corrupt_method = build_corruption(self.opt, log)
@@ -70,7 +73,7 @@ class Runner(L.LightningModule):
             log.info(f"[Net] Loaded ema ckpt: {opt.load}!")
 
     def train_dataloader(self):
-        train_loader = DataLoader(self.dataset,
+        train_loader = DataLoader(self.train_dataset,
                                   batch_size= self.opt.microbatch,
                                   shuffle=True,
                                   num_workers=16,
@@ -102,12 +105,92 @@ class Runner(L.LightningModule):
         if batch_idx % 10 == 0:
             self.log("loss", loss.detach())
 
-    #def validation_step
+    def validation_step(self, batch, batch_idx):
+        log = self.log
+        log.info(f"========== Evaluation started: iter={batch_idx} ==========")
 
-    #def validation_dataloader
+        img_clean, img_corrupt, mask, y, cond = self.sample_batch(batch, self.corrupt_method)
+
+        x1 = img_corrupt
+
+        xs, pred_x0s = self.ddpm_sampling(
+            x1, mask=mask, cond=cond, clip_denoise=self.opt.clip_denoise, verbose=self.opt.global_rank==0
+        )
+        del x1
+
+        log.info("Collecting tensors ...")
+        img_clean   = self.all_gather( img_clean).detach().cpu()
+        img_corrupt = self.all_gather( img_corrupt).detach().cpu()
+        y           = self.all_gather( y).detach().cpu()
+        xs          = self.all_gather( xs).detach().cpu()
+        pred_x0s    = self.all_gather( pred_x0s).detach().cpu()
+
+        batch, len_t, *xdim = xs.shape
+        assert img_clean.shape == img_corrupt.shape == (batch, *xdim)
+        assert xs.shape == pred_x0s.shape
+        assert y.shape == (batch,)
+        log.info(f"Generated recon trajectories: size={xs.shape}")
+
+        def log_image(tag, img, nrow=10):
+            self.logger.log_image(tag, make_grid((img + 1)/2 , nrow=nrow))
+
+
+        log.info("Logging images ...")
+        img_recon = xs[:, 0, ...]
+        log_image("image/clean",   img_clean)
+        log_image("image/corrupt", img_corrupt)
+        log_image("image/recon",   img_recon)
+        log_image("debug/pred_clean_traj", pred_x0s.reshape(-1, *xdim), nrow=len_t)
+        log_image("debug/recon_traj",      xs.reshape(-1, *xdim),      nrow=len_t)
+
+
+        log.info(f"========== Evaluation finished: iter={self.global_step} ==========")
+
+
+    def ddpm_sampling(self, x1, mask=None, cond=None, clip_denoise=False, nfe=None, log_count=10, verbose=True):
+        nfe = nfe or self.opt.interval-1
+        assert 0 < nfe < self.opt.interval == len(self.diffusion.betas)
+        steps = util.space_indices(self.opt.interval, nfe+1)
+
+        log_count = min(len(steps)-1, log_count)
+        log_steps = [steps[i] for i in util.space_indices(len(steps)-1, log_count)]
+        assert log_steps[0] == 0
+        self.syslog.info(f"[DDPM Sampling] steps={self.opt.interval}, {nfe=}, {log_steps=}!")
+
+        #x1 = x1.to(opt.device)
+        if cond is not None: cond = cond.type_as(x1)
+        if mask is not None:
+            mask = mask.type_as(x1)
+            x1 = (1. - mask) * x1 + mask * torch.randn_like(x1)
+
+        with self.ema.average_parameters():
+            self.net.eval()
+
+            def pred_x0_fn(xt, step):
+                step = torch.full((xt.shape[0],), step, dtype=torch.long).type_as(x1) #FIXME: move tensor to X1 device
+                out = self.net(xt, step, cond=cond)
+                return self.compute_pred_x0(step, xt, out, clip_denoise=clip_denoise)
+
+            xs, pred_x0 = self.diffusion.ddpm_sampling(
+                steps, pred_x0_fn, x1, mask=mask, ot_ode=self.opt.ot_ode, log_steps=log_steps, verbose=verbose,
+            )
+
+        b, *xdim = x1.shape
+        assert xs.shape == pred_x0.shape == (b, log_count, *xdim)
+
+        return xs, pred_x0
+
+    def validation_dataloader(self):
+        val_loader = DataLoader(self.val_dataset,
+                                  batch_size= self.opt.microbatch,
+                                  shuffle=True,
+                                  num_workers=4,
+                                  pin_memory=True,
+                                  drop_last=True)
+        return val_loader
 
     def configure_optimizers(self):
-        optimizer, sched = build_optimizer_sched(self.opt, self.net, self.SysLog) # FIXME how to make sched in L?
+        optimizer, sched = build_optimizer_sched(self.opt, self.net, self.syslog) # FIXME how to make sched in L?
         return optimizer
     # TODO does L has its own setup for sampling?
     def sample_batch(self, batch, corrupt_method):
@@ -237,6 +320,7 @@ if __name__ == '__main__':
                             callbacks=[checkpoint_callback, bar],
                             logger= wandb_logger,
                             strategy='ddp_find_unused_parameters_true',
+                            val_check_interval=0.1, # FIXME: not validating
                             #fast_dev_run=True,
                             )
         trainer.fit(diffusion_model, 

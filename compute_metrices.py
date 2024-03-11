@@ -145,7 +145,7 @@ def get_ref_fid(opt, log):
             log.info(f"Downloading {ref_fid_fn=} (this can take a while ...)")
             download(ADM_IMG256_FID_TRAIN_REF_CKPT, ref_fid_fn)
     elif split == "val":
-        ref_fid_fn = Path("data/fid_imagenet_256_val.npz")
+        ref_fid_fn = Path("data/fid_custom_256_val.npz") if opt.image_size == 256 else Path("data/fid_celeba_128_val.npz")
         if not ref_fid_fn.exists():
             log.info(f"Generating {ref_fid_fn=} (this can take a while ...)")
             ref_opt = build_ref_opt(opt, ref_fid_fn)

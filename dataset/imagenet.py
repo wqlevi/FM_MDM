@@ -76,7 +76,7 @@ def _build_lmdb_dataset(
         meminit=False)
     with data_set.lmdb_data.begin() as txn:
         length = txn.stat()['entries']
-    print('\033[91m' + str(length)+ '\033[0m') # checking if LMDB actually loaded
+    #print('\033[91m' + str(length)+ '\033[0m') # checking if LMDB actually loaded
     # reset transform and target_transform
     data_set.samples = data_set.imgs
     data_set.transform = transform 
@@ -155,7 +155,7 @@ class InpaintingVal10kSubset(Dataset):
 
         assert mask in ["center", "freeform1020", "freeform2030"]
         self.mask_type = mask
-        self.dataset = build_lmdb_dataset_val10k(opt, log)
+        self.dataset = build_lmdb_dataset_val_custom(opt, log)
 
         from corruption.inpaint import get_center_mask, load_freeform_masks
         if self.mask_type == "center":

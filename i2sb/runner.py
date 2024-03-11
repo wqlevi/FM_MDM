@@ -23,7 +23,8 @@ import distributed_util as dist_util
 from evaluation import build_resnet50
 
 from . import util
-from .network import Image256Net
+from .network import Image128Net
+#from .network import Image256Net
 from .diffusion import Diffusion
 
 from ipdb import set_trace as debug

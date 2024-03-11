@@ -10,6 +10,7 @@ import time
 import logging
 from rich.console import Console
 from rich.logging import RichHandler
+import datetime
 
 def get_time(sec):
     h = int(sec//3600)
@@ -32,6 +33,9 @@ class TimeFilter(logging.Filter):
         # self.last = record.relativeCreated/1000.0
         return True
 
+def get_date_time():
+    return datetime.datetime.now().strftime("%m-%d-%Y_%H-%M")
+
 class Logger(object):
     def __init__(self, rank=0, log_dir=".log"):
         # other libraries may set logging before arriving at this line.
@@ -41,8 +45,9 @@ class Logger(object):
         self.rank = rank
         if self.rank == 0:
             os.makedirs(log_dir, exist_ok=True)
-
-            log_file = open(os.path.join(log_dir, "log.txt"), "w")
+            
+            datestamp = get_date_time()
+            log_file = open(os.path.join(log_dir, "log_{}.txt".format(datestamp)), "w")
             file_console = Console(file=log_file, width=150)
             logging.basicConfig(
                 level=logging.INFO,
