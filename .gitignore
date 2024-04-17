@@ -3,6 +3,8 @@ results/
 debug_scripts/
 
 # Byte-compiled / optimized / DLL files
+log/*
+wandb/
 __pycache__/
 *__pycache__/
 *.py[cod]

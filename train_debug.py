@@ -22,10 +22,9 @@ import torch
 from torch.distributed import init_process_group, barrier, destroy_process_group
 
 from logger import Logger
-from distributed_util import init_processes
 from corruption import build_corruption
 from dataset import imagenet
-from i2sb import Runner_old, download_ckpt
+from i2sb import Runner_FM, download_ckpt
 
 import colored_traceback.always
 from ipdb import set_trace as debug
@@ -122,6 +121,7 @@ def main(opt):
     opt.global_rank = rank
     opt.local_rank = rank - opt.n_gpu_per_node * (rank// opt.n_gpu_per_node)
     node_rank = int(os.environ.get("SLURM_NODEID"))
+    print(f"main function of global rank {opt.global_rank}\tlocal rank {opt.local_rank}\tnode index {node_rank}\tlocal world size {world_size} of total world size of {opt.global_size}")
     log = Logger(opt.global_rank, opt.log_dir)
     log.info("=======================================================")
     log.info("         Image-to-Image Schrodinger Bridge")
@@ -129,7 +129,7 @@ def main(opt):
     log.info("Command used:\n{}".format(" ".join(sys.argv)))
     log.info(f"Experiment ID: {opt.name}")
 
-    init_process_group("nccl", rank=rank, world_size=world_size)
+    init_process_group("nccl", rank=rank, world_size=opt.global_size)
     # set seed: make sure each gpu has differnet seed!
     if opt.seed is not None:
         set_seed(opt.seed + opt.global_rank)
@@ -147,18 +147,12 @@ def main(opt):
     # build corruption method
     corrupt_method = build_corruption(opt, log)
 
-    run = Runner_old(opt, log) #[FIXED][BYPASSED] using spawn
+    run = Runner_FM(opt, log) #[FIXED][BYPASSED] using spawn
     run.train(opt, train_dataset, val_dataset, corrupt_method) 
     log.info("Finish!")
+    barrier()
+    destroy_process_group()
 
-"""
-def spawn_fn(fn, world_size, opt):
-    spawn(fn,
-          args=(world_size, main_fn, opt),
-          nprocs = world_size,
-          join=True
-          )
-"""
 
 if __name__ == '__main__':
     opt = create_training_options()

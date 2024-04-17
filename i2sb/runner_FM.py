@@ -77,6 +77,7 @@ class Runner(object):
             log.info("Saved options pickle to {}!".format(opt_pkl_path))
 
         opt.device = opt.local_rank
+        print(f'\033[92mCurrent device-Runner : {torch.cuda.current_device()}\t {opt.device=}\033[0m')
         model_arch_dict= {
         'learn_sigma':False,
         'use_checkpoint': False,
@@ -91,18 +92,21 @@ class Runner(object):
         self.net = UNetModel(dim=(3, opt.image_size, opt.image_size),
                              num_channels=128,
                              num_res_blocks=2,
-                             **model_arch_dict).to(opt.device)
+                             **model_arch_dict)
         
         log.info(f"[Net] Net work size={util.count_parameters(self.net)}!")
 
         self.node = NeuralODE(self.net, solver='dopri5', sensitivity='adjoint', atol=1e-4, rtol=1e-4)
         self.FM = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
+        self.current_iter = 0
         log.info(f"[Flow matching] Built FM!")
 
         if opt.load:
             checkpoint = torch.load(opt.load, map_location="cpu")
             self.net.load_state_dict(checkpoint['net'])
-            log.info(f"[Net] Loaded network ckpt: {opt.load}!")
+            log.info(f"[Net] Loaded network ckpt: {opt.load}!") 
+            self.current_iter= checkpoint['sched']['last_epoch']
+            log.info(f"[Iter] Loaded iter ckpt: {self.current_iter}!")
 
         self.net.to(opt.device)
 
@@ -152,13 +156,13 @@ class Runner(object):
         net.train()
         n_inner_loop = opt.batch_size // (opt.global_size * opt.microbatch)
 
-        for it in range(opt.num_itr):
+        for it in range(self.current_iter, opt.num_itr):
             optimizer.zero_grad()
             runtime = 0  
             for _ in range(n_inner_loop): # only cumulate gradients here:
                 # ===== sample boundary pair =====
                 time, (x0, x1, mask, y, cond) = self.sample_batch(opt, train_loader, corrupt_method) 
-                t, xt, ut = self.FM.sample_location_and_conditional_flow(x0, x1)
+                t, xt, ut = self.FM.sample_location_and_conditional_flow(x1, x0)
                 # ===== compute loss =====
 
                 vt = net(t, xt)
@@ -235,7 +239,7 @@ class Runner(object):
 
 
         log.info("Logging images ...")
-        img_recon = xs[:,0]
+        img_recon = xs[:,-1]
         log_image("image/clean",   img_clean)
         log_image("image/corrupt", img_corrupt)
         log_image("image/recon",   img_recon)

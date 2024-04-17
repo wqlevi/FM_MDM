@@ -112,6 +112,7 @@ def build_inpaint_center(opt, log, mask_type):
     def inpaint_center(img):
         # img: [-1,1]
         mask = center_mask
+        mask = mask.type_as(img)
         # img[mask==0] = img[mask==0], img[mask==1] = 1 (white)
         return img * (1. - mask) + mask, mask
 
