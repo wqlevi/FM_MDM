@@ -24,7 +24,7 @@ from logger import Logger
 from distributed_util import init_processes
 from corruption import build_corruption
 from dataset import imagenet
-from i2sb import Runner_FM, download_ckpt
+from i2sb import Runner_FM_MDM, download_ckpt
 
 import colored_traceback.always
 from ipdb import set_trace as debug
@@ -62,6 +62,7 @@ def create_training_options():
     parser.add_argument("--beta-max",       type=float, default=0.3,         help="max diffusion for the diffusion model")
     # parser.add_argument("--beta-min",       type=float, default=0.1)
     parser.add_argument("--ot-ode",         action="store_true",             help="use OT-ODE model")
+    parser.add_argument("--use-weighting",  action="store_true",             help="use coeff weighting")
     parser.add_argument("--clip-denoise",   action="store_true",             help="clamp predicted image to [-1,1] at each")
 
     # optional configs for conditional network
@@ -139,7 +140,7 @@ def main(opt):
     # build corruption method
     corrupt_method = build_corruption(opt, log)
 
-    run = Runner_FM(opt, log) #[FIXED][BYPASSED] using spawn
+    run = Runner_FM_MDM(opt, log) #[FIXED][BYPASSED] using spawn
     run.train(opt, train_dataset, val_dataset, corrupt_method) 
     log.info("Finish!")
 

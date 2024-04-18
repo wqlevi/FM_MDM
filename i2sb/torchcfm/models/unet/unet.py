@@ -420,6 +420,7 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
+        skip_mid = False,
     ):
         super().__init__()
 
@@ -441,6 +442,7 @@ class UNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+        self.skip_mid = skip_mid
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -453,9 +455,8 @@ class UNetModel(nn.Module):
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
         ch = input_ch = int(channel_mult[0] * model_channels)
-        self.input_blocks = nn.ModuleList(
-            [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
-        )
+        self.in_layer = TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))
+        self.input_blocks = nn.ModuleList([])
         self._feature_size = ch
         input_block_chans = [ch]
         ds = 1
@@ -511,7 +512,7 @@ class UNetModel(nn.Module):
                 self._feature_size += ch
 
         # ----- middle_block fixed shape ----- #
-        self.middle_block = TimestepEmbedSequential(
+        if not self.skip_mid: self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -634,7 +635,7 @@ class UNetModel(nn.Module):
             hs.append(h)
         #[print(f"input block shape: {hh.shape}") for hh in hs]
 
-        h = self.middle_block(h, emb)
+        if not self.skip_mid: h = self.middle_block(h, emb)
         #print(f"mid block shape: {h.shape}")
 
         for module in self.output_blocks:
@@ -886,6 +887,7 @@ class UNetModelWrapper(UNetModel):
         resblock_updown=False,
         use_fp16=False,
         use_new_attention_order=False,
+        skip_mid=False,
     ):
         """Dim (tuple): (C, H, W)"""
         image_size = dim[-1]
@@ -931,6 +933,7 @@ class UNetModelWrapper(UNetModel):
             use_scale_shift_norm=use_scale_shift_norm,
             resblock_updown=resblock_updown,
             use_new_attention_order=use_new_attention_order,
+            skip_mid=skip_mid,
         )
 
     def forward(self, t, x, y=None, *args, **kwargs):

@@ -65,5 +65,5 @@ def all_gather(tensor, log=None):
     ]
     tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
     with torch.no_grad():
-        dist.all_gather(gathered_tensors, tensor) #[FIXME] tensor is not contiguous
+        dist.all_gather(gathered_tensors, tensor) 
     return gathered_tensors
