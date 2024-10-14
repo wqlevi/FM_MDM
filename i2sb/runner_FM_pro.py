@@ -81,7 +81,7 @@ class Runner(object):
         opt.device = opt.local_rank
         print(f'\033[92mCurrent device-Runner : {torch.cuda.current_device()}\t {opt.device=}\033[0m')
 
-        self.net = nestedUnet(opt.device, min_size=64, training_mode=opt.train_mode) 
+        self.net = nestedUnet(opt.device, min_size=64, use_prounet=True) 
         log.info(f"[Net] Net work size={util.count_parameters(self.net)}!")
 
         self.node = NeuralODE(self.net, solver='dopri5', sensitivity='adjoint', atol=1e-4, rtol=1e-4)
@@ -120,11 +120,11 @@ class Runner(object):
     def create_res_group(self, opt, itr):
         res_factors = [2,1,0]
         if itr < opt.num_itr //3:
-            return [build_inpaint_center(opt.image_size//2**i, opt.device) for i in res_factors[:1]], [opt.image_size//2**i for i in res_factors[:1]]
+            return [build_inpaint_center(opt.image_size//2**2, opt.device) ], [opt.image_size//2**2]
         elif (itr >= opt.num_itr //3) and (itr < 2*opt.num_itr//3):
-            return [build_inpaint_center(opt.image_size//2**i, opt.device) for i in res_factors[:2]], [opt.image_size//2**i for i in res_factors[:2]]
+            return [build_inpaint_center(opt.image_size//2**1, opt.device) ], [opt.image_size//2**1]
         else:
-            return [build_inpaint_center(opt.image_size//2**i, opt.device) for i in res_factors[:3]], [opt.image_size//2**i for i in res_factors[:3]]
+            return [build_inpaint_center(opt.image_size//2**0, opt.device) ], [opt.image_size//2**0]
 
     def train(self, opt, train_dataset, val_dataset, corrupt_method):
         coeff_dict = {1:[1,0,0], 2:[.5,1,0], 3:[.25, .5, 1]}
@@ -147,6 +147,7 @@ class Runner(object):
             loss_v0 = 0
             loss_v1 = 0
             loss_v2 = 0
+            loss_v = 0
 
             corrupt_method_all_res, res_group = self.create_res_group(opt, it)
             optimizer.zero_grad()
@@ -162,20 +163,12 @@ class Runner(object):
                 ut_ls = [sub_ls[2] for sub_ls in res_ls]
                 vt_ls = net(t, xt_ls)
 
-                loss_0 = F.mse_loss(vt_ls[0], ut_ls[0])
-                loss_1 = F.mse_loss(vt_ls[1], ut_ls[1]) if len(res_group) >1 else torch.tensor(0, dtype=torch.float32, device=opt.device)
-                loss_2 = F.mse_loss(vt_ls[2], ut_ls[2]) if len(res_group) >2 else torch.tensor(0, dtype=torch.float32, device=opt.device)
-                weight_coeff = get_weight_coeff(len(res_group), coeff_dict)
-                loss = loss_0 + loss_1 + loss_2 if not opt.use_weighting else weight_coeff[0]*loss_0 + weight_coeff[1]*loss_1 + weight_coeff[2]*loss_2 # DONE: adaptively change the coeff wrt current res
+                loss = F.mse_loss(vt_ls[0], ut_ls[0])
                 loss.backward()
-                loss_v0 += loss_0.item()
-                loss_v1 += loss_1.item()
-                loss_v2 += loss_2.item()
+                loss_v += loss.item()
                 
             optimizer.step()
-            loss_v0 /= n_inner_loop
-            loss_v1 /= n_inner_loop
-            loss_v2 /= n_inner_loop
+            loss_v /= n_inner_loop
 
             if sched is not None: sched.step()
 
@@ -184,12 +177,10 @@ class Runner(object):
                 1+it,
                 opt.num_itr,
                 "{:.2e}".format(optimizer.param_groups[0]['lr']),
-                "{:+.4f}".format(loss.item()),
+                "{:+.4f}".format(loss_v),
             ))
             if it % 10 == 0:
-                self.writer.add_scalar(it, 'loss_0', loss_v0)
-                self.writer.add_scalar(it, 'loss_1', loss_v1)
-                self.writer.add_scalar(it, 'loss_2', loss_v2)
+                self.writer.add_scalar(it, 'loss', loss_v)
 
             if it % 500 == 0 and it != 0:
                 if opt.global_rank == 0:
@@ -225,6 +216,7 @@ class Runner(object):
 
         val_ls = [self.sample_batch(opt, clean_img, corrupt_method, res) for corrupt_method, res in zip(corrupt_method_all_res, res_group)]
 
+        res_now = int(res_group[0])
         x1_ls = [x[1] for x in val_ls] # img_ls clean
         x0_ls = [x[0] for x in val_ls] # img_ls corrupt
 
@@ -236,15 +228,14 @@ class Runner(object):
         img_ls_corrupt = [all_cat_cpu(opt, log, img_corrupt) for img_corrupt in x1_ls]
         img_ls_recon   = [all_cat_cpu(opt, log, xs) for xs in traj_ls]# [B, 2, ...]
         #pred_x0s    = all_cat_cpu(opt, log, pred_x0s)
-        num_res = len(img_ls_clean) # which progressive res it is
         def log_image(tag, img, nrow=10):
             self.writer.add_image(it, tag, tu.make_grid((img+1)/2, nrow=nrow)) # [1,1] -> [0,1]
 
 
         log.info("Logging images ...")
-        [log_image("image/clean_{}".format(res),   img_ls_clean[res]) for res in range(num_res)]
-        [log_image("image/corrupt_{}".format(res), img_ls_corrupt[res]) for res in range(num_res)]
-        [log_image("image/recon_{}".format(res),   img_ls_recon[res]) for res in range(num_res)]
+        log_image("image/clean_{}".format(res_now),   img_ls_clean[0])
+        log_image("image/corrupt_{}".format(res_now), img_ls_corrupt[0])
+        log_image("image/recon_{}".format(res_now),   img_ls_recon[0])
 
         log.info(f"========== Evaluation finished: iter={it} ==========")
         torch.cuda.empty_cache()

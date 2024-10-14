@@ -15,6 +15,7 @@ import argparse
 import copy
 from pathlib import Path
 from datetime import datetime
+from importlib import import_module
 
 import numpy as np
 import torch
@@ -24,7 +25,8 @@ from torch.distributed import init_process_group, barrier, destroy_process_group
 from logger import Logger
 from corruption import build_corruption
 from dataset import imagenet
-from i2sb import Runner_FM_MDM, download_ckpt
+#from i2sb import Runner_FM_MDM as Runner
+from i2sb import download_ckpt
 
 import colored_traceback.always
 from ipdb import set_trace as debug
@@ -45,6 +47,7 @@ def create_training_options():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed",           type=int,   default=0)
     parser.add_argument("--name",           type=str,   default="test",        help="experiment ID")
+    parser.add_argument("--train-mode",     type=str,   default="MDM",        help="MDM, MDM256x256, progressive")
     parser.add_argument("--ckpt",           type=str,   default=None,        help="resumed checkpoint name")
     parser.add_argument("--gpu",            type=int,   default=None,        help="set only if you wish to run on a particular device")
     parser.add_argument("--n-gpu-per-node", type=int,   default=1,           help="number of gpu on each node")
@@ -63,6 +66,7 @@ def create_training_options():
     # parser.add_argument("--beta-min",       type=float, default=0.1)
     parser.add_argument("--ot-ode",         action="store_true",             help="use OT-ODE model")
     parser.add_argument("--use-weighting",  action="store_true",             help="use coeff weighting")
+    #parser.add_argument("--use-prounet",  action="store_true",             help="use progressive unet")
     parser.add_argument("--clip-denoise",   action="store_true",             help="clamp predicted image to [-1,1] at each")
 
     # optional configs for conditional network
@@ -148,7 +152,17 @@ def main(opt):
     # build corruption method
     corrupt_method = build_corruption(opt, log)
 
-    run = Runner_FM(opt, log) #[FIXED][BYPASSED] using spawn
+    if opt.train_mode == 'MDM':
+        Runner = import_module('i2sb').Runner_FM_MDM
+    elif opt.train_mode == 'MDM256x256':
+        Runner = import_module('i2sb').Runner_FM_256x256
+    elif opt.train_mode == 'progressive':
+        Runner = import_module('i2sb').Runner_FM_pro
+    else:
+        raise NotImplementedError('Train mode unknown')
+    run_name = opt.train_mode
+    log.info('[Runner]: Using {} strategy!'.format(run_name))
+    run = Runner(opt, log) #[FIXED][BYPASSED] using spawn
     run.train(opt, train_dataset, val_dataset, corrupt_method) 
     log.info("Finish!")
     barrier()

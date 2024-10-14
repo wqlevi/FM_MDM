@@ -5,10 +5,10 @@
 # initial working dir:
 #SBATCH -D ./
 # Job name:
-#SBATCH -J I2SB_micro16
+#SBATCH -J I2SB_micro32_W
 # Node feature
 #SBATCH --ntasks-per-node=4
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 ### SBATCH --ntasks=4
 ## #SBATCH --mem=20G
 #SBATCH --constraint="gpu"
@@ -42,11 +42,9 @@ export MASTER_PORT=12316
 export WORLD_SIZE=$(($SLURM_NNODES * $SLURM_NTASKS_PER_NODE))
 srun hostname > hostfile.txt
 
-pip install gdown
-pip install torchdyn
-pip install pot
 
-srun python train_debug.py --num-proc-node 4 --n-gpu-per-node 4 --name 'raven_FM_MDM_micro16' --corrupt 'inpaint-center' --num-itr 200000 --batch-size 256 --dataset-dir '/ptmp/wangqi/celeba_hq_256/' --microbatch 8 --log-writer 'wandb' --wandb-api-key 'e8b8669b01462d8329d90ab655789f2e0e203ca8' --wandb-user 'wqlevi' --image-size 256 --ckpt 'raven_FM_MDM_micro16'
+srun python train_debug.py --num-proc-node 8 --n-gpu-per-node 4 --name 'raven_MDM_micro32_large' --train-mode 'MDM' --corrupt 'inpaint-center' --num-itr 200000 --batch-size 256 --dataset-dir '/ptmp/wangqi/celeba_hq_256/' --microbatch 2 --log-writer 'wandb' --wandb-api-key 'e8b8669b01462d8329d90ab655789f2e0e203ca8' --wandb-user 'wqlevi' --image-size 256  --lr-gamma 1 --use-weighting --ckpt 'raven_MDM_micro32_large'
+
 echo "Jobs finished"
 
 
