@@ -1,9 +1,4 @@
-# ---------------------------------------------------------------
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-#
-# This work is licensed under the NVIDIA Source Code License
-# for I2SB. To view a copy of this license, see the LICENSE file.
-# ---------------------------------------------------------------
+# utility function for diffusion and FM runners
 
 import os
 import time
@@ -15,15 +10,10 @@ from torch.utils.data import DataLoader
 from prefetch_generator import BackgroundGenerator
 
 class DataLoaderX(DataLoader):
-    #def __init__(self, dataset, **kwargs):
-        #super().__init__()
-        #self.gen = BackgroundGenerator(dataset)
-    #def __iter__(self):
-        #return self.gen.__iter__()
     def __iter__(self): 
-        return BackgroundGenerator(super().__iter__()) # When yielded, returns BG.__iter__
+        return BackgroundGenerator(super().__iter__()) # When yielded, returns BG.__iter__ for faster prefetching
 
-def setup_loader(dataset, batch_size, num_workers=4): # [NOTE] dataset is just a generic dataset obj
+def setup_loader(dataset, batch_size, num_workers=4): 
     #loader = DataLoader(
     loader = DataLoaderX(
         dataset,
@@ -41,9 +31,9 @@ class BaseWriter(object):
     def __init__(self, opt):
         self.rank = opt.global_rank
     def add_scalar(self, step, key, val):
-        pass # do nothing
+        pass 
     def add_image(self, step, key, image):
-        pass # do nothing
+        pass 
     def close(self): pass
 
 class WandBWriter(BaseWriter):
@@ -110,13 +100,13 @@ def unsqueeze_xdim(z, xdim):
     bc_dim = (...,) + (None,) * len(xdim)
     return z[bc_dim]
 
-# TODO: my implementation
+# wrapper function to measure time spent in fn
 def time_wrap(name:str=None):
     def time_wrap(fn):
         def inner(*args, **kwargs):
             start_time = time.time()
             out = fn(*args, **kwargs)
-            #print(f"Function {name}\tTime spent : {time.time() - start_time} sec")
+            print(f"Function {name}\tTime spent : {time.time() - start_time} sec")
             time_used = time.time() - start_time
             return time_used, out
         return inner

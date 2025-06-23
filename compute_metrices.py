@@ -21,7 +21,7 @@ from torch.utils.data import Dataset
 from logger import Logger
 from evaluation.resnet import build_resnet50
 from evaluation import fid_util
-from i2sb import download
+from fm_mdm import download
 
 import colored_traceback.always
 from ipdb import set_trace as debug

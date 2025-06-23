@@ -35,8 +35,8 @@ import wandb
 
 from dataset.LMDB2ImageFolder import Dset
 #from torchcfm.models.unet import NestedUNetModel, UNetModel
-from i2sb.torchcfm.models.unet import nestedunet
-from i2sb.torchcfm.conditional_flow_matching import *
+from fm_mdm.torchcfm.models.unet import nestedunet
+from fm_mdm.torchcfm.conditional_flow_matching import *
 from build_mask import build_inpaint_center
 import distributed_util as dist_util
 

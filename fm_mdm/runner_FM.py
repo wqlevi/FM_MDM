@@ -1,9 +1,4 @@
-# ---------------------------------------------------------------
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-#
-# This work is licensed under the NVIDIA Source Code License
-# for I2SB. To view a copy of this license, see the LICENSE file.
-# ---------------------------------------------------------------
+# Runner for FM with fixed resolition. e.g. 256x256
 
 import os
 import numpy as np
@@ -14,24 +9,23 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW, lr_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from typing import List
 
 from torchdyn.core import NeuralODE
 from torch_ema import ExponentialMovingAverage
 import torchvision.utils as tu
-from torchvision.transforms import Resize
 import torchmetrics
 
 import distributed_util as dist_util
 from evaluation import build_resnet50
 
 from . import util
+from .network import Image128Net
+from .network import Image256Net
 from .diffusion import Diffusion
-from .torchcfm.models.unet import nestedUnet
+from .torchcfm.models.unet import UNetModel
 from .torchcfm.conditional_flow_matching import *
-from build_mask import build_inpaint_center
 
-#from ipdb import set_trace as debug
+from ipdb import set_trace as debug
 
 def build_optimizer_sched(opt, net, log):
 
@@ -39,7 +33,6 @@ def build_optimizer_sched(opt, net, log):
     optimizer = AdamW(net.parameters(), **optim_dict)
     log.info(f"[Opt] Built AdamW optimizer {optim_dict=}!")
 
-    # FIXME lr to constant 5e-5
     if opt.lr_gamma < 1.0:
         sched_dict = {"step_size": opt.lr_step, 'gamma': opt.lr_gamma}
         sched = lr_scheduler.StepLR(optimizer, **sched_dict)
@@ -62,9 +55,9 @@ def build_optimizer_sched(opt, net, log):
 
     return optimizer, sched
 
-def all_cat_cpu(opt, log, t:torch.Tensor):
+def all_cat_cpu(opt, log, t):
     if not opt.distributed: return t.detach().cpu()
-    gathered_t = dist_util.all_gather(t.to(opt.local_rank), log=log)# return tensor gathered from all devices
+    gathered_t = dist_util.all_gather(t.to(opt.local_rank), log=log)
     return torch.cat(gathered_t).detach().cpu()
 
 class Runner(object):
@@ -80,8 +73,22 @@ class Runner(object):
 
         opt.device = opt.local_rank
         print(f'\033[92mCurrent device-Runner : {torch.cuda.current_device()}\t {opt.device=}\033[0m')
+        model_arch_dict= {
+        'learn_sigma':False,
+        'use_checkpoint': False,
+        'num_heads': 1,
+        'num_head_channels': -1,
+        'num_heads_upsample': -1,
+        'dropout': 0,
+        'resblock_updown': False,
+        'use_fp16': False,
+        }
 
-        self.net = nestedUnet(opt.device, min_size=64, use_prounet=True) 
+        self.net = UNetModel(dim=(3, opt.image_size, opt.image_size),
+                             num_channels=128,
+                             num_res_blocks=2,
+                             **model_arch_dict)
+        
         log.info(f"[Net] Net work size={util.count_parameters(self.net)}!")
 
         self.node = NeuralODE(self.net, solver='dopri5', sensitivity='adjoint', atol=1e-4, rtol=1e-4)
@@ -93,48 +100,49 @@ class Runner(object):
             checkpoint = torch.load(opt.load, map_location="cpu")
             self.net.load_state_dict(checkpoint['net'])
             log.info(f"[Net] Loaded network ckpt: {opt.load}!") 
-            self.current_iter= checkpoint['sched']['last_epoch'] if checkpoint['sched'] is not None else checkpoint['epoch']# FIXME conflict with constant LR
+            self.current_iter= checkpoint['sched']['last_epoch']
             log.info(f"[Iter] Loaded iter ckpt: {self.current_iter}!")
 
         self.net.to(opt.device)
 
         self.log = log
 
-    def sample_batch(self, opt, clean_img, corrupt_method, resize:int):
-        #clean_img, y = next(loader)
-        clean_img = Resize(resize)(clean_img)
-        rank = opt.device
-        with torch.no_grad():
-            corrupt_img, mask = corrupt_method(clean_img.to(rank))
-
-        #y  = y.detach().to(rank)
-        x0 = clean_img.detach().to(rank)
-        x1 = corrupt_img.detach().to(rank)
-        if mask is not None:
-            mask = mask.detach().to(rank)
-            x1 = (1. - mask) * x1 + mask * torch.randn_like(x1)
-        cond = None
-        assert x0.shape == x1.shape
-        return x0, x1, mask, cond
-
-    def create_res_group(self, opt, itr):
-        res_factors = [2,1,0]
-        if itr < opt.num_itr //3:
-            return [build_inpaint_center(opt.image_size//2**2, opt.device) ], [opt.image_size//2**2]
-        elif (itr >= opt.num_itr //3) and (itr < 2*opt.num_itr//3):
-            return [build_inpaint_center(opt.image_size//2**1, opt.device) ], [opt.image_size//2**1]
+    @util.time_wrap("sample_time")
+    def sample_batch(self, opt, loader, corrupt_method):
+        if opt.corrupt == "mixture":
+            clean_img, corrupt_img, y = next(loader)
+            mask = None
+        elif "inpaint" in opt.corrupt:
+            clean_img, y = next(loader)
+            with torch.no_grad():
+                corrupt_img, mask = corrupt_method(clean_img.to(opt.device))
         else:
-            return [build_inpaint_center(opt.image_size//2**0, opt.device) ], [opt.image_size//2**0]
+            clean_img, y = next(loader) # type(loader) = 'generator' 
+            with torch.no_grad():
+                corrupt_img = corrupt_method(clean_img.to(opt.device))
+            mask = None
+
+        y  = y.detach().to(opt.device)
+        x0 = clean_img.detach().to(opt.device)
+        x1 = corrupt_img.detach().to(opt.device)
+        if mask is not None:
+            mask = mask.detach().to(opt.device)
+            x1 = (1. - mask) * x1 + mask * torch.randn_like(x1)
+        cond = x1.detach() if opt.cond_x1 else None
+
+        if opt.add_x1_noise: # only for decolor
+            x1 = x1 + torch.randn_like(x1)
+
+        assert x0.shape == x1.shape
+
+        return x0, x1, mask, y, cond
 
     def train(self, opt, train_dataset, val_dataset, corrupt_method):
-        coeff_dict = {1:[1,0,0], 2:[.5,1,0], 3:[.25, .5, 1]}
-        def get_weight_coeff(len_res:int, coeff_dict:dict):
-            return coeff_dict[len_res]
-            
         self.writer = util.build_log_writer(opt)
         log = self.log
 
-        net = DDP(self.net, device_ids=[opt.device], find_unused_parameters=True) # device_ids = [int]
+        net = DDP(self.net, device_ids=[opt.device]) # device_ids = [int]
+        #net = DDP(self.net, device_ids=[opt.local_rank]) # device_ids = [int]
         optimizer, sched = build_optimizer_sched(opt, net, log)
 
         train_loader = util.setup_loader(train_dataset, opt.microbatch, num_workers=0) # len(train_dataset) = 1281167
@@ -144,43 +152,34 @@ class Runner(object):
         n_inner_loop = opt.batch_size // (opt.global_size * opt.microbatch)
 
         for it in range(self.current_iter, opt.num_itr):
-            loss_v0 = 0
-            loss_v1 = 0
-            loss_v2 = 0
-            loss_v = 0
-
-            corrupt_method_all_res, res_group = self.create_res_group(opt, it)
             optimizer.zero_grad()
+            runtime = 0  
             for _ in range(n_inner_loop): # only cumulate gradients here:
                 # ===== sample boundary pair =====
-                clean_img, _ = next(train_loader)
-                tmp_ls = [self.sample_batch(opt, clean_img, corrupt_method, res) for corrupt_method, res in zip(corrupt_method_all_res, res_group)]
-                res_ls = [self.FM.sample_location_and_conditional_flow(tmp[1], tmp[0]) for tmp in tmp_ls]
-
+                time, (x0, x1, mask, y, cond) = self.sample_batch(opt, train_loader, corrupt_method) 
+                t, xt, ut = self.FM.sample_location_and_conditional_flow(x1, x0)
                 # ===== compute loss =====
-                xt_ls = [sub_ls[1] for sub_ls in res_ls]
-                t = res_ls[0][0]
-                ut_ls = [sub_ls[2] for sub_ls in res_ls]
-                vt_ls = net(t, xt_ls)
 
-                loss = F.mse_loss(vt_ls[0], ut_ls[0])
+                vt = net(t, xt)
+
+                loss = F.mse_loss(vt, ut)
                 loss.backward()
-                loss_v += loss.item()
                 
+                runtime += float(time)#[TODO]
             optimizer.step()
-            loss_v /= n_inner_loop
-
+            runtime /= n_inner_loop
             if sched is not None: sched.step()
 
             # -------- logging --------
-            log.info("train_it {}/{} | lr:{} | loss:{} ".format(
+            log.info("train_it {}/{} | lr:{} | loss:{} | runtime ave:{}".format(
                 1+it,
                 opt.num_itr,
                 "{:.2e}".format(optimizer.param_groups[0]['lr']),
-                "{:+.4f}".format(loss_v),
+                "{:+.4f}".format(loss.item()),
+                "{:+.3f}".format(runtime),
             ))
             if it % 10 == 0:
-                self.writer.add_scalar(it, 'loss', loss_v)
+                self.writer.add_scalar(it, 'loss', loss.detach())
 
             if it % 500 == 0 and it != 0:
                 if opt.global_rank == 0:
@@ -188,7 +187,6 @@ class Runner(object):
                         "net": self.net.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "sched": sched.state_dict() if sched is not None else sched,
-                        "epoch": it,
                     }, opt.ckpt_path / "latest.pt")
                     log.info(f"Saved latest({it=}) checkpoint to {opt.ckpt_path=}!")
                 if opt.distributed:
@@ -196,46 +194,52 @@ class Runner(object):
 
             if it == 100 or it % 3000 == 0: # 0, 0.5k, 3k, 6k 9k
                 net.eval()
-                self.evaluation(opt, it, val_loader, corrupt_method_all_res, res_group)
+                self.evaluation(opt, it, val_loader, corrupt_method)
                 net.train()
         self.writer.close()
 
     @torch.no_grad()
-    def FM_sampling(self, opt, x1_ls:list, mask=None, cond=None, clip_denoise=False, nfe=None, log_count=10, verbose=True):
+    def FM_sampling(self, opt, x1, mask=None, cond=None, clip_denoise=False, nfe=None, log_count=10, verbose=True):
 
-        traj = [self.node.trajectory(x1, t_span = torch.linspace(0,1,2).to(opt.device)) for x1 in x1_ls] # traj: [t_span, B, ...]
-        traj_end = [j[-1] for j in traj]
-        return traj_end
+        traj = self.node.trajectory(x1, t_span = torch.linspace(0,1,2).to(opt.device)) # traj: [t_span, B, ...]
+        traj = traj.permute(1,0,2,3,4)
+        return traj 
 
     @torch.no_grad()
-    def evaluation(self, opt, it, val_loader, corrupt_method_all_res, res_group):
+    def evaluation(self, opt, it, val_loader, corrupt_method):
 
         log = self.log
         log.info(f"========== Evaluation started: iter={it} ==========")
-        clean_img, _ = next(val_loader)
 
-        val_ls = [self.sample_batch(opt, clean_img, corrupt_method, res) for corrupt_method, res in zip(corrupt_method_all_res, res_group)]
+        _,(img_clean, img_corrupt, mask, y, cond) = self.sample_batch(opt, val_loader, corrupt_method)
 
-        res_now = int(res_group[0])
-        x1_ls = [x[1] for x in val_ls] # img_ls clean
-        x0_ls = [x[0] for x in val_ls] # img_ls corrupt
-
-        traj_ls = self.FM_sampling(opt, x1_ls) # img_ls recon
+        x1 = img_corrupt.to(opt.device)
+        xs = self.FM_sampling(opt, x1) # xs:[B, 2, xdim]
 
         log.info("Collecting tensors ...")
-
-        img_ls_clean   = [all_cat_cpu(opt, log, img_clean) for img_clean in x0_ls]
-        img_ls_corrupt = [all_cat_cpu(opt, log, img_corrupt) for img_corrupt in x1_ls]
-        img_ls_recon   = [all_cat_cpu(opt, log, xs) for xs in traj_ls]# [B, 2, ...]
+        img_clean   = all_cat_cpu(opt, log, img_clean)
+        img_corrupt = all_cat_cpu(opt, log, img_corrupt)
+        y           = all_cat_cpu(opt, log, y)
+        xs          = all_cat_cpu(opt, log, xs) # [B, 2, ...]
         #pred_x0s    = all_cat_cpu(opt, log, pred_x0s)
+
+        batch, len_t, *xdim = xs.shape
+        assert img_clean.shape == img_corrupt.shape == (batch, *xdim), "got img_clean shape:{}, img_corrupt shape: {}".format(img_clean.shape, img_corrupt.shape)
+        #assert xs.shape == pred_x0s.shape
+        assert y.shape == (batch,)
+        #log.info(f"Generated recon trajectories: size={xs.shape}")
+
         def log_image(tag, img, nrow=10):
             self.writer.add_image(it, tag, tu.make_grid((img+1)/2, nrow=nrow)) # [1,1] -> [0,1]
 
 
         log.info("Logging images ...")
-        log_image("image/clean_{}".format(res_now),   img_ls_clean[0])
-        log_image("image/corrupt_{}".format(res_now), img_ls_corrupt[0])
-        log_image("image/recon_{}".format(res_now),   img_ls_recon[0])
+        img_recon = xs[:,-1]
+        log_image("image/clean",   img_clean)
+        log_image("image/corrupt", img_corrupt)
+        log_image("image/recon",   img_recon)
+        #log_image("debug/pred_clean_traj", pred_x0s.reshape(-1, *xdim), nrow=len_t)
+        #log_image("debug/recon_traj",      xs.reshape(-1, *xdim),      nrow=len_t)
 
         log.info(f"========== Evaluation finished: iter={it} ==========")
         torch.cuda.empty_cache()

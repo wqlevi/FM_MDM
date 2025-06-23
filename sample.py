@@ -23,10 +23,10 @@ import torchvision.utils as tu
 
 from logger import Logger
 import distributed_util as dist_util
-from i2sb import Runner_old, download_ckpt
+from fm_mdm import Runner_old, download_ckpt
 from corruption import build_corruption
 from dataset import imagenet
-from i2sb import ckpt_util
+from fm_mdm import ckpt_util
 
 import colored_traceback.always
 from ipdb import set_trace as debug

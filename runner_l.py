@@ -18,10 +18,10 @@ from torchvision.utils import make_grid
 from lightning.pytorch.callbacks import ModelCheckpoint, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
-from i2sb.network import Image128Net
-from i2sb.diffusion import Diffusion
-from i2sb.runner import make_beta_schedule, build_optimizer_sched
-from i2sb import util 
+from fm_mdm.network import Image128Net
+from fm_mdm.diffusion import Diffusion
+from fm_mdm.runner import make_beta_schedule, build_optimizer_sched
+from fm_mdm import util 
 from evaluation import build_resnet50
 from logger import Logger
 

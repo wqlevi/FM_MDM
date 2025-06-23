@@ -1,10 +1,4 @@
-# ---------------------------------------------------------------
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-#
-# This work is licensed under the NVIDIA Source Code License
-# for I2SB. To view a copy of this license, see the LICENSE file.
-# ---------------------------------------------------------------
-### Re-implemented for Lightning ###
+# constructing a diffusion instance
 
 import numpy as np
 from tqdm import tqdm
@@ -26,8 +20,9 @@ def compute_gaussian_product_coef(sigma1, sigma2):
     return coef1, coef2, var
 
 class Diffusion():
-    def __init__(self, betas):
+    def __init__(self, betas, device):
 
+        self.device = device
 
         # compute analytic std: eq 11
         std_fwd = np.sqrt(np.cumsum(betas))
@@ -37,12 +32,13 @@ class Diffusion():
 
         # tensorize everything
         to_torch = partial(torch.tensor, dtype=torch.float32)
-        self.betas = to_torch(betas)
-        self.std_fwd = to_torch(std_fwd)
-        self.std_bwd = to_torch(std_bwd)
-        self.std_sb  = to_torch(std_sb)
-        self.mu_x0 = to_torch(mu_x0)
-        self.mu_x1 = to_torch(mu_x1)
+        print(f"\033[91mDevice used in Diffusion: {device}\033[0m") # returns "cuda" in all process
+        self.betas = to_torch(betas).to(device)
+        self.std_fwd = to_torch(std_fwd).to(device)
+        self.std_bwd = to_torch(std_bwd).to(device)
+        self.std_sb  = to_torch(std_sb).to(device)
+        self.mu_x0 = to_torch(mu_x0).to(device)
+        self.mu_x1 = to_torch(mu_x1).to(device)
 
     def get_std_fwd(self, step, xdim=None):
         std_fwd = self.std_fwd[step]
@@ -54,9 +50,9 @@ class Diffusion():
         assert x0.shape == x1.shape
         batch, *xdim = x0.shape
 
-        mu_x0  = unsqueeze_xdim(self.mu_x0[step],  xdim).to(x0.device) # on cpu
-        mu_x1  = unsqueeze_xdim(self.mu_x1[step],  xdim).to(x0.device)
-        std_sb = unsqueeze_xdim(self.std_sb[step], xdim).to(x0.device)
+        mu_x0  = unsqueeze_xdim(self.mu_x0[step],  xdim)
+        mu_x1  = unsqueeze_xdim(self.mu_x1[step],  xdim)
+        std_sb = unsqueeze_xdim(self.std_sb[step], xdim)
 
         xt = mu_x0 * x0 + mu_x1 * x1
         if not ot_ode:
@@ -80,7 +76,8 @@ class Diffusion():
         return xt_prev
 
     def ddpm_sampling(self, steps, pred_x0_fn, x1, mask=None, ot_ode=False, log_steps=None, verbose=True):
-        xt = x1.detach()
+        xt = x1.detach().to(self.device)
+
         xs = []
         pred_x0s = []
 
@@ -100,7 +97,7 @@ class Diffusion():
             if mask is not None:
                 xt_true = x1
                 if not ot_ode:
-                    _prev_step = torch.full((xt.shape[0],), prev_step, dtype=torch.long)
+                    _prev_step = torch.full((xt.shape[0],), prev_step, device=self.device, dtype=torch.long)
                     std_sb = unsqueeze_xdim(self.std_sb[_prev_step], xdim=x1.shape[1:])
                     xt_true = xt_true + std_sb * torch.randn_like(xt_true)
                 xt = (1. - mask) * xt_true + mask * xt

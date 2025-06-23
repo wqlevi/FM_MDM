@@ -1,9 +1,6 @@
-# ---------------------------------------------------------------
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-#
-# This work is licensed under the NVIDIA Source Code License
-# for I2SB. To view a copy of this license, see the LICENSE file.
-# ---------------------------------------------------------------
+# ===========
+#   main training script
+# ===========
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
@@ -15,16 +12,18 @@ import argparse
 import copy
 from pathlib import Path
 from datetime import datetime
+from importlib import import_module
 
 import numpy as np
 import torch
-from torch.multiprocessing import Process, spawn, set_start_method
+#from torch.multiprocessing import Process, spawn, set_start_method
+from torch.distributed import init_process_group, barrier, destroy_process_group
 
 from logger import Logger
-from distributed_util import init_processes
 from corruption import build_corruption
 from dataset import imagenet
-from i2sb import Runner_FM_MDM, download_ckpt
+#from i2sb import Runner_FM_MDM as Runner
+from fm_mdm import download_ckpt
 
 import colored_traceback.always
 from ipdb import set_trace as debug
@@ -32,7 +31,6 @@ from ipdb import set_trace as debug
 RESULT_DIR = Path("results")
 
 def set_seed(seed):
-    # https://github.com/pytorch/pytorch/issues/7068
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
@@ -45,6 +43,7 @@ def create_training_options():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed",           type=int,   default=0)
     parser.add_argument("--name",           type=str,   default="test",        help="experiment ID")
+    parser.add_argument("--train-mode",     type=str,   default="MDM",        help="MDM, MDM256x256, progressive")
     parser.add_argument("--ckpt",           type=str,   default=None,        help="resumed checkpoint name")
     parser.add_argument("--gpu",            type=int,   default=None,        help="set only if you wish to run on a particular device")
     parser.add_argument("--n-gpu-per-node", type=int,   default=1,           help="number of gpu on each node")
@@ -63,6 +62,7 @@ def create_training_options():
     # parser.add_argument("--beta-min",       type=float, default=0.1)
     parser.add_argument("--ot-ode",         action="store_true",             help="use OT-ODE model")
     parser.add_argument("--use-weighting",  action="store_true",             help="use coeff weighting")
+    #parser.add_argument("--use-prounet",  action="store_true",             help="use progressive unet")
     parser.add_argument("--clip-denoise",   action="store_true",             help="clamp predicted image to [-1,1] at each")
 
     # optional configs for conditional network
@@ -71,7 +71,7 @@ def create_training_options():
 
     # --------------- optimizer and loss ---------------
     parser.add_argument("--batch-size",     type=int,   default=256)
-    parser.add_argument("--microbatch",     type=int,   default=8,           help="accumulate gradient over microbatch until full batch-size")
+    parser.add_argument("--microbatch",     type=int,   default=2,           help="accumulate gradient over microbatch until full batch-size")
     parser.add_argument("--num-itr",        type=int,   default=1000000,     help="training iteration")
     parser.add_argument("--lr",             type=float, default=5e-5,        help="learning rate")
     parser.add_argument("--lr-gamma",       type=float, default=0.99,        help="learning rate decay ratio")
@@ -116,13 +116,22 @@ def create_training_options():
     return opt
 
 def main(opt):
+    rank = int(os.environ.get("SLURM_PROCID"))
+    world_size = int(os.environ.get("WORLD_SIZE"))
+
+    opt.global_rank = rank
+    opt.local_rank = rank - opt.n_gpu_per_node * (rank// opt.n_gpu_per_node)
+    node_rank = int(os.environ.get("SLURM_NODEID"))
+    print(f"main function of global rank {opt.global_rank}\tlocal rank {opt.local_rank}\tnode index {node_rank}\tlocal world size {world_size} of total world size of {opt.global_size}")
+
     log = Logger(opt.global_rank, opt.log_dir)
     log.info("=======================================================")
-    log.info("         Image-to-Image Schrodinger Bridge")
+    log.info("         Flow Matching at various scales")
     log.info("=======================================================")
     log.info("Command used:\n{}".format(" ".join(sys.argv)))
     log.info(f"Experiment ID: {opt.name}")
 
+    init_process_group("nccl", rank=rank, world_size=opt.global_size)
     # set seed: make sure each gpu has differnet seed!
     if opt.seed is not None:
         set_seed(opt.seed + opt.global_rank)
@@ -140,53 +149,30 @@ def main(opt):
     # build corruption method
     corrupt_method = build_corruption(opt, log)
 
-    run = Runner_FM_MDM(opt, log) #[FIXED][BYPASSED] using spawn
+    # parsed train_mode option for different training schemes
+    # TODO: convert module selection into LUT
+    if opt.train_mode == 'MDM':
+        Runner = import_module('fm_mdm').Runner_FM_MDM
+    elif opt.train_mode == 'MDM256x256':
+        Runner = import_module('fm_mdm').Runner_FM_256x256
+    elif opt.train_mode == 'progressive':
+        Runner = import_module('fm_mdm').Runner_FM_pro
+    else:
+        raise NotImplementedError('Train mode unknown')
+    run_name = opt.train_mode
+    log.info('[Runner]: Using {} strategy!'.format(run_name))
+    run = Runner(opt, log) #[FIXED][BYPASSED] using spawn
     run.train(opt, train_dataset, val_dataset, corrupt_method) 
     log.info("Finish!")
+    barrier()
+    destroy_process_group()
 
-def spawn_fn(fn, world_size, main_fn, opt):
-    spawn(fn,
-          args=(world_size, main_fn, opt),
-          nprocs = world_size,
-          join=True
-          )
 
 if __name__ == '__main__':
     opt = create_training_options()
 
     assert opt.corrupt is not None
 
-    # one-time download: ADM checkpoint
-    #download_ckpt("data/")
-
-
     opt.global_size = opt.num_proc_node * opt.n_gpu_per_node
     #main(opt)
-    if opt.distributed:
-        size = opt.n_gpu_per_node
-        set_start_method("spawn") 
-
-        #spawn_fn(init_processes, size, main, opt)
-
-        processes = []
-        for rank in range(size):
-            opt = copy.deepcopy(opt)
-            opt.local_rank = rank
-            global_rank = rank + opt.node_rank * opt.n_gpu_per_node
-            global_size = opt.num_proc_node * opt.n_gpu_per_node
-            opt.global_rank = global_rank
-            opt.global_size = global_size
-            print('\033[93m (hard-coded)\033[0m Node rank %d, local proc %d, global proc %d, global_size %d' % (opt.node_rank, opt.local_rank, global_rank, global_size))
-            p = Process(target=init_processes, args=(global_rank, global_size, main, opt)) #[FIXED] CUDA init error for line:142 
-            p.start()
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-    else:
-        print("single GPU Mode")
-        torch.cuda.set_device(0) # 
-        opt.global_rank = 0
-        opt.local_rank = 0
-        opt.global_size = 1
-        init_processes(0, opt.n_gpu_per_node, main, opt)
+    main(opt)

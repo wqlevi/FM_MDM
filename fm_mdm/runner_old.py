@@ -1,9 +1,4 @@
-# ---------------------------------------------------------------
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-#
-# This work is licensed under the NVIDIA Source Code License
-# for I2SB. To view a copy of this license, see the LICENSE file.
-# ---------------------------------------------------------------
+# Runner for i2sb diffusion models
 
 import os
 import numpy as np
@@ -24,8 +19,7 @@ from evaluation import build_resnet50
 
 from . import util
 from .network import Image128Net
-#from .network import Image256Net
-from .diffusion import Diffusion
+from .diffusion_old import Diffusion
 
 from ipdb import set_trace as debug
 
@@ -69,9 +63,9 @@ def all_cat_cpu(opt, log, t):
     gathered_t = dist_util.all_gather(t.to(opt.local_rank), log=log)
     return torch.cat(gathered_t).detach().cpu()
 
-class Runner(object):
+class Runner_old(object):
     def __init__(self, opt, log, save_opt=True):
-        super(Runner,self).__init__()
+        super(Runner_old,self).__init__()
 
         # Save opt.
         if save_opt:
@@ -84,20 +78,22 @@ class Runner(object):
         betas = make_beta_schedule(n_timestep=opt.interval, linear_end=opt.beta_max / opt.interval)
         betas = np.concatenate([betas[:opt.interval//2], np.flip(betas[:opt.interval//2])])
         print(f'\033[92mCurrent device-Runner : {torch.cuda.current_device()}\033[0m')
-        #self.diffusion = Diffusion(betas, opt.local_rank) 
-        self.diffusion = Diffusion(betas, opt.device) #[FIXME] still CUDA init error when DDP
+        self.diffusion = Diffusion(betas, opt.device) #[NOTE] only use local_rank in all callbacks, except for init_process where gloab_rank should be used
         log.info(f"[Diffusion] Built I2SB diffusion: steps={len(betas)}!")
 
         noise_levels = torch.linspace(opt.t0, opt.T, opt.interval, device=opt.device) * opt.interval
-        self.net = Image256Net(log, noise_levels=noise_levels, use_fp16=opt.use_fp16, cond=opt.cond_x1)
+        self.net = Image128Net(log, noise_levels=noise_levels, use_fp16=opt.use_fp16, cond=opt.cond_x1)
         self.ema = ExponentialMovingAverage(self.net.parameters(), decay=opt.ema)
 
+        self.ckpt_iter = 0
         if opt.load:
             checkpoint = torch.load(opt.load, map_location="cpu")
             self.net.load_state_dict(checkpoint['net'])
             log.info(f"[Net] Loaded network ckpt: {opt.load}!")
             self.ema.load_state_dict(checkpoint["ema"])
             log.info(f"[Ema] Loaded ema ckpt: {opt.load}!")
+            self.ckpt_iter = checkpoint['sched']['last_epoch']
+            log.info(f"[Iters] Loaded iteration ckpt: {self.ckpt_iter}!")
 
         self.net.to(opt.device)
         self.ema.to(opt.device)
@@ -132,11 +128,6 @@ class Runner(object):
                 corrupt_img = corrupt_method(clean_img.to(opt.device))
             mask = None
 
-        # os.makedirs(".debug", exist_ok=True)
-        # tu.save_image((clean_img+1)/2, ".debug/clean.png", nrow=4)
-        # tu.save_image((corrupt_img+1)/2, ".debug/corrupt.png", nrow=4)
-        # debug()
-
         y  = y.detach().to(opt.device)
         x0 = clean_img.detach().to(opt.device)
         x1 = corrupt_img.detach().to(opt.device)
@@ -170,19 +161,19 @@ class Runner(object):
         net.train()
         n_inner_loop = opt.batch_size // (opt.global_size * opt.microbatch)
 
-        for it in range(opt.num_itr):
+        for it in range(self.ckpt_iter, opt.num_itr):
             optimizer.zero_grad()
             runtime = 0 # [TODO]
             for _ in range(n_inner_loop): # only cumulate gradients here:
                 #pid = os.getpid()
                 #python_process = psutil.Process(pid)
                 # ===== sample boundary pair =====
-                t, (x0, x1, mask, y, cond) = self.sample_batch(opt, train_loader, corrupt_method)  # [TODO] t for recording runtime
                 #memoryUse = python_process.memory_info()[0]/2.**30
                 #print(f"\033[91mMemory usage per micro-batch sample: {memoryUse} \033[0m")
                 #print(f"\033[91mMemory usage per micro-batch GPU: {torch.cuda.memory_allocated(opt.device)/2.**30} \033[0m")
                 # ===== compute loss =====
-                step = torch.randint(0, opt.interval, (x0.shape[0],))
+                t, (x0, x1, mask, y, cond) = self.sample_batch(opt, train_loader, corrupt_method)  # [TODO] t for recording runtime
+                step = torch.randint(0, opt.interval, (x0.shape[0], ))
 
                 xt = self.diffusion.q_sample(step, x0, x1, ot_ode=opt.ot_ode)
                 label = self.compute_label(step, x0, xt)
@@ -196,7 +187,7 @@ class Runner(object):
 
                 loss = F.mse_loss(pred, label)
                 loss.backward()
-                
+ 
                 runtime += float(t)#[TODO]
             optimizer.step()
             ema.update()
@@ -229,7 +220,7 @@ class Runner(object):
 
             if it == 500 or it % 3000 == 0: # 0, 0.5k, 3k, 6k 9k
                 net.eval()
-                #self.evaluation(opt, it, val_loader, corrupt_method)
+                self.evaluation(opt, it, val_loader, corrupt_method)
                 net.train()
         self.writer.close()
 
@@ -278,7 +269,7 @@ class Runner(object):
         log = self.log
         log.info(f"========== Evaluation started: iter={it} ==========")
 
-        img_clean, img_corrupt, mask, y, cond = self.sample_batch(opt, val_loader, corrupt_method)
+        t, (img_clean, img_corrupt, mask, y, cond )= self.sample_batch(opt, val_loader, corrupt_method)
 
         x1 = img_corrupt.to(opt.device)
 
